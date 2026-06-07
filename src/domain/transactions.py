@@ -1,38 +1,42 @@
-from decimal import Decimal
-from datetime import datetime
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.infra.database import get_db
+from src.infra.repositories import AccountRepository, TransactionRepository
+from src.domain.transactions import TransactionCreate, TransactionResponse
 
+router = APIRouter(prefix="/v1/transactions", tags=["Transações"])
 
-class TransactionCreate(BaseModel):
-    account_id: int = Field(..., description="ID identificador da conta corrente")
-    operation_type_id: int = Field(..., description="ID do tipo de operação (1 a 4)")
-    amount: Decimal = Field(..., description="Valor nominal da transação (sempre positivo na requisição)", gt=0)
-
-    @field_validator("operation_type_id")
-    @classmethod
-    def validate_operation_type(cls, value: int) -> int:
-        if value not in [1, 2, 3, 4]:
-            raise ValueError("Tipo de operação inválido. Valores permitidos: 1, 2, 3 ou 4.")
-        return value
-
-    @property
-    def adjusted_amount(self) -> Decimal:
-        """
-        Regra de Ouro (Ledger): Tipos 1, 2 e 3 são débitos (devem ser armazenados como negativos).
-        Tipo 4 é crédito (deve ser armazenado como positivo).
-        """
-        if self.operation_type_id in [1, 2, 3]:
-            return -abs(self.amount)
-        return abs(self.amount)
-
-
-
-class TransactionResponse(BaseModel):
-    transaction_id: int
-    account_id: int
-    operation_type_id: int
-    amount: Decimal
-    event_date: datetime
-
-    class Config:
-        from_attributes = True
+@router.post("", response_model=TransactionResponse, status_code=status.HTTP_201_CREATED)
+async def create_transaction(payload: TransactionCreate, db: AsyncSession = Depends(get_db)):
+    account_repo = AccountRepository(db)
+    transaction_repo = TransactionRepository(db)
+    
+    # 1. Busca a conta aplicando o Lock Pessimista (SELECT FOR UPDATE) para evitar concorrência
+    account = await account_repo.get_by_id(payload.account_id, lock_for_update=True)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conta informada não existe."
+        )
+        
+    # 2. Calcula o valor ajustado (Débitos ficam negativos via propriedade do domínio)
+    final_amount = payload.adjusted_amount
+    
+    # 3. Se for uma operação de débito (1, 2 ou 3), valida se há saldo suficiente
+    if payload.operation_type_id in [1, 2, 3]:
+        current_balance = await account_repo.get_balance(payload.account_id)
+        # Como final_amount é negativo, se o saldo atual for menor que o valor absoluto do débito, barra a operação
+        if current_balance < abs(final_amount):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Saldo insuficiente para realizar esta operação."
+            )
+            
+    # 4. Registra a transação de forma imutável no Ledger
+    transaction = await transaction_repo.create(
+        account_id=payload.account_id,
+        operation_type_id=payload.operation_type_id,
+        amount=final_amount
+    )
+    
+    return transaction

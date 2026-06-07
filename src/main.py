@@ -1,17 +1,21 @@
 from fastapi import FastAPI
 from src.infra.database import engine, Base
+from src.api.v1.accounts import router as accounts_router
+from src.api.v1.transactions import router as transactions_router
 
 app = FastAPI(
-    title="Pismo Core-Banking Pro",
+    title="Core-Banking Pro",
     description="API assíncrona de alta performance para controle de contas e transações.",
     version="1.0.0"
 )
 
-# Evento do FastAPI para criar as tabelas no PostgreSQL assim que o app iniciar
+# Registra as rotas na aplicação principal
+app.include_router(accounts_router)
+app.include_router(transactions_router)
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
-        # Cria as tabelas na base de dados caso elas não existam
         await conn.run_sync(Base.metadata.create_all)
 
 @app.get("/health", tags=["Monitoramento"])

@@ -1,26 +1,35 @@
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.infra.database import get_db
+from src.infra.repositories import AccountRepository
+from src.domain.accounts import AccountCreate, AccountResponse
 
-class AccountCreate(BaseModel):
-    document_number: str = Field(
-        ..., 
-        description="Número do documento único do cliente (CPF ou CNPJ)",
-        min_length=11,
-        max_length=14
-    )
+router = APIRouter(prefix="/v1/accounts", tags=["Contas"])
 
-    @field_validator("document_number")
-    @classmethod
-    def validate_document_format(cls, value: str) -> str:
+@router.post("", response_model=AccountResponse, status_code=status.HTTP_201_CREATED)
+async def create_account(payload: AccountCreate, db: AsyncSession = Depends(get_db)):
+    repository = AccountRepository(db)
+    
+    # Valida se o documento já está cadastrado para evitar duplicidade (Regra do User_History)
+    existing_account = await repository.get_by_document(payload.document_number)
+    if existing_account:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Uma conta com este número de documento já existe."
+        )
         
-        cleaned = "".join(filter(str.isdigit, value))
-        
-        if len(cleaned) not in [11, 14]:
-            raise ValueError("O documento deve ter 11 dígitos (CPF) ou 14 dígitos (CNPJ).")
-            
-        return cleaned
+    account = await repository.create(document_number=payload.document_number)
+    return account
 
-class AccountResponse(BaseModel):
-    account_id: int
-    document_number: str
-    class Config:
-        from_attributes = True  
+@router.get("/{account_id}", response_model=AccountResponse)
+async def get_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    repository = AccountRepository(db)
+    
+    account = await repository.get_by_id(account_id)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conta não encontrada."
+        )
+        
+    return account
